@@ -1,8 +1,9 @@
-import requests
 import base64
 from groq import Groq
 from dotenv import load_dotenv
 import os
+import requests
+import random
 
 # Load environment variables
 load_dotenv()
@@ -10,57 +11,119 @@ load_dotenv()
 # Initialize Groq client
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+# Spoonacular API key
+SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY")
+
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return f"data:image/jpeg;base64,{base64.b64encode(image_file.read()).decode('utf-8')}"
 
 def analyze_fridge_image(image_path):
-    base64_image = encode_image(image_path)
+    image_data_url = encode_image(image_path)
     
-    prompt = f"""
-    Analyze the following image of a fridge and list all the food items you can identify.
-    Then, count the total number of distinct food items.
-    
-    Image: data:image/jpeg;base64,{base64_image}
-    """
-    
-    response = groq_client.chat.completions.create(
-        model="llama-3.2-90b-vision-preview",
+    completion = groq_client.chat.completions.create(
+        model="llama-3.2-11b-vision-preview",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that analyzes images of fridges."},
-            {"role": "user", "content": prompt}
-        ]
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Analyze this image of a fridge and list all the food items you can identify in detail with their quantity. For example: Tomatoes (3). Show each ingredient and its quantity on a separate line. Then, count the total number of distinct food items."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_url
+                        }
+                    }
+                ]
+            }
+        ],
+        temperature=0.7,
+        max_tokens=1024,
+        top_p=1,
+        stream=False,
+        stop=None
     )
     
-    return response.choices[0].message.content
+    return completion.choices[0].message.content
 
-def generate_recipes(ingredients):
-    prompt = f"""
-    Generate 3 recipe ideas using some or all of the following ingredients:
-    {', '.join(ingredients)}
-    
-    For each recipe, provide:
-    1. Recipe name
-    2. Ingredients used (from the list)
-    3. Brief cooking instructions
-    """
-    
-    response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",  # Using a text-based model for recipe generation
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that generates recipes."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-    
-    return response.choices[0].message.content
+def extract_ingredients(analysis_result):
+    lines = analysis_result.split('\n')
+    ingredients = []
+    for line in lines:
+        if '(' in line and ')' in line:
+            item = line.split('(')[0].strip()
+            if item and not any(word in item.lower() for word in ['unfortunately', 'however', 'please', 'total']):
+                ingredients.append(item)
+    return ingredients
 
-def get_calorie_info(recipe):
-    # This is a placeholder function. In a real application, you would integrate
-    # with a nutrition API to get accurate calorie information.
-    # For demonstration purposes, we'll return a random number.
-    import random
-    return random.randint(300, 800)
+def generate_recipes_spoonacular(ingredients):
+    base_url = "https://api.spoonacular.com/recipes/findByIngredients"
+    params = {
+        "apiKey": SPOONACULAR_API_KEY,
+        "ingredients": ",".join(ingredients),
+        "number": 3,
+        "ranking": 1,
+        "ignorePantry": True
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+        recipes = response.json()
+        
+        if not recipes:
+            print("No recipes found. Using fallback method.")
+            return generate_fallback_recipes(ingredients)
+        
+        detailed_recipes = []
+        for recipe in recipes:
+            recipe_id = recipe['id']
+            detailed_recipe = get_recipe_details(recipe_id)
+            if detailed_recipe:
+                detailed_recipes.append(detailed_recipe)
+        
+        return detailed_recipes if detailed_recipes else generate_fallback_recipes(ingredients)
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling Spoonacular API: {e}")
+        return generate_fallback_recipes(ingredients)
+
+def get_recipe_details(recipe_id):
+    base_url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
+    params = {
+        "apiKey": SPOONACULAR_API_KEY,
+        "includeNutrition": True
+    }
+    
+    try:
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+        recipe_info = response.json()
+        
+        return {
+            'name': recipe_info['title'],
+            'ingredients': recipe_info['extendedIngredients'],
+            'instructions': recipe_info['instructions'],
+            'calories': next((nutrient['amount'] for nutrient in recipe_info['nutrition']['nutrients'] if nutrient['name'] == 'Calories'), None)
+        }
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting recipe details: {e}")
+        return None
+
+def generate_fallback_recipes(ingredients):
+    print("Using fallback recipe generation method.")
+    recipes = []
+    for i in range(3):
+        recipe = {
+            'name': f"Simple {random.choice(ingredients)} Recipe {i+1}",
+            'ingredients': [{'name': ing} for ing in random.sample(ingredients, min(len(ingredients), 5))],
+            'instructions': "Mix all ingredients and cook to your liking.",
+            'calories': random.randint(200, 800)
+        }
+        recipes.append(recipe)
+    return recipes
 
 def main():
     image_path = "images/Fridge1.jpg"
@@ -71,20 +134,28 @@ def main():
     print(analysis_result)
     
     # Extract ingredients from the analysis result
-    # This is a simplification. In a real application, you'd need more robust parsing.
-    ingredients = [item.strip() for item in analysis_result.split('\n') if item.strip()]
+    ingredients = extract_ingredients(analysis_result)
+    print("\nExtracted Ingredients:")
+    print(ingredients)
     
-    # Generate recipes
-    recipes = generate_recipes(ingredients)
-    print("\nGenerated Recipes:")
-    print(recipes)
-    
-    # Get calorie information for each recipe
-    # This is a simplification. In a real application, you'd parse the recipes and get accurate calorie info.
-    print("\nCalorie Information:")
-    for i, recipe in enumerate(recipes.split('\n\n'), 1):
-        calories = get_calorie_info(recipe)
-        print(f"Recipe {i}: Approximately {calories} calories")
+    if ingredients:
+        # Generate recipes using Spoonacular or fallback method
+        recipes = generate_recipes_spoonacular(ingredients)
+        
+        if recipes:
+            print("\nGenerated Recipes:")
+            for i, recipe in enumerate(recipes, 1):
+                print(f"\nRecipe {i}: {recipe['name']}")
+                print("Ingredients used:")
+                for ingredient in recipe['ingredients']:
+                    print(f"- {ingredient['name']}")
+                print("Instructions:")
+                print(recipe['instructions'])
+                print(f"Approximate calories: {recipe['calories']}")
+        else:
+            print("No recipes could be generated.")
+    else:
+        print("No ingredients were extracted. Please check the image analysis result.")
 
 if __name__ == "__main__":
     main()
