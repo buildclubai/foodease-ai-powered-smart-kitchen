@@ -25,7 +25,7 @@ def analyze_fridge_image(image_path):
     """
     
     response = groq_client.chat.completions.create(
-        model="llama-3.2-90b-vision-preview",
+        model="llama-3.2-3b-vision-preview",
         messages=[
             {"role": "system", "content": "You are a helpful assistant that analyzes images of fridges."},
             {"role": "user", "content": prompt}
@@ -46,7 +46,7 @@ def generate_recipes(ingredients):
     """
     
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",  # Using a text-based model for recipe generation
+        model="llama-3.2-90b-chat",  # Using a text-based model for recipe generation
         messages=[
             {"role": "system", "content": "You are a helpful assistant that generates recipes."},
             {"role": "user", "content": prompt}
