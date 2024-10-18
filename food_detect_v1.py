@@ -1,24 +1,14 @@
 import base64
+from groq import Groq
+from dotenv import load_dotenv
 import os
 import requests
 import random
-from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
-import cv2
-import numpy as np
-import google.generativeai as genai
-from groq import Groq
-from google.api_core import exceptions as google_exceptions
-import re
 
 # Load environment variables
 load_dotenv()
 
-# Configure Google Generative AI
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=GOOGLE_API_KEY)
-
-# Initialize Groq client (if still needed)
+# Initialize Groq client
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # Spoonacular API key
@@ -26,98 +16,48 @@ SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY")
 
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return f"data:image/jpeg;base64,{base64.b64encode(image_file.read()).decode('utf-8')}"
 
 def analyze_fridge_image(image_path):
-    try:
-        image = Image.open(image_path)
-        model = genai.GenerativeModel(model_name="gemini-1.5-pro")
-        
-        prompt_items = """
-        Analyze this image of a refrigerator's contents and list all the food items you can identify.
-        For each item, provide the following information in this exact format:
-        Item: [Item name]
-        Quantity: [Estimated quantity or 'Not visible' if you can't determine]
-        Location: [Bounding box coordinates as [ymin, xmin, ymax, xmax] if possible, or describe the location in the fridge]
+    image_data_url = encode_image(image_path)
+    
+    completion = groq_client.chat.completions.create(
+        model="llama-3.2-11b-vision-preview",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Analyze this image of a fridge and list all the food items you can identify in detail with their quantity. For example: Tomatoes (3). Show each ingredient and its quantity on a separate line. Then, count the total number of distinct food items."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_url
+                        }
+                    }
+                ]
+            }
+        ],
+        temperature=0.7,
+        max_tokens=1024,
+        top_p=1,
+        stream=False,
+        stop=None
+    )
+    
+    return completion.choices[0].message.content
 
-        Be as specific as possible about the item and its quantity. If you can't determine the exact quantity, provide an estimate or range.
-        For the location, always try to provide bounding box coordinates. If you can't determine precise coordinates, provide an approximate location.
-        After listing all items, on a new line, state the total number of distinct food items.
-        """
-        
-        response_items = model.generate_content([prompt_items, image])
-        items_info = parse_item_info(response_items.text.strip())
-        
-        # Generate annotated image
-        annotated_image = generate_annotated_image(image_path, items_info)
-        
-        # Prepare analysis result
-        analysis_result = "\n".join([f"{item}: {info['quantity']} - {info['location']}" for item, info in items_info.items()])
-        analysis_result += f"\n\nTotal number of distinct food items: {len(items_info)}"
-        
-        return analysis_result, annotated_image, items_info
-
-    except google_exceptions.ResourceExhausted:
-        print("API quota exceeded. Please try again later.")
-        return None, None, None
-    except Exception as e:
-        print(f"An error occurred during image analysis: {str(e)}")
-        return None, None, None
-
-def parse_item_info(response_text):
-    items_info = {}
-    current_item = None
-    for line in response_text.split('\n'):
-        if line.startswith("Item:"):
-            current_item = line.split(":", 1)[1].strip()
-            items_info[current_item] = {}
-        elif line.startswith("Quantity:") and current_item:
-            items_info[current_item]['quantity'] = line.split(":", 1)[1].strip()
-        elif line.startswith("Location:") and current_item:
-            location = line.split(":", 1)[1].strip()
-            box = parse_bounding_box(location)
-            items_info[current_item]['box'] = box
-            items_info[current_item]['location'] = location if box == [0, 0, 0, 0] else f"Coordinates: {box}"
-    return items_info
-
-def parse_bounding_box(text):
-    # Try to find a list of four numbers in the text
-    match = re.search(r'\[?\s*(\d+(?:\.\d+)?)\s*,?\s*(\d+(?:\.\d+)?)\s*,?\s*(\d+(?:\.\d+)?)\s*,?\s*(\d+(?:\.\d+)?)\s*\]?', text)
-    if match:
-        return [float(match.group(i)) for i in range(1, 5)]
-    else:
-        # If no valid bounding box is found, return default
-        return [0, 0, 0, 0]
-
-def generate_annotated_image(image_path, items_info):
-    image = cv2.imread(image_path)
-    height, width = image.shape[:2]
-
-    for item, info in items_info.items():
-        box = info['box']
-        quantity = info['quantity']
-        
-        if box != [0, 0, 0, 0]:
-            ymin, xmin, ymax, xmax = map(int, box)
-            
-            # Ensure coordinates are within image boundaries
-            xmin = max(0, min(xmin, width - 1))
-            ymin = max(0, min(ymin, height - 1))
-            xmax = max(0, min(xmax, width - 1))
-            ymax = max(0, min(ymax, height - 1))
-            
-            # Only draw rectangle if coordinates are valid
-            if xmin < xmax and ymin < ymax:
-                cv2.rectangle(image, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                label = f"{item}: {quantity}"
-                cv2.putText(image, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            else:
-                print(f"Invalid bounding box for {item}: {box}")
-        else:
-            print(f"No bounding box for {item}")
-
-    # Convert back to PIL Image for consistency
-    return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+def extract_ingredients(analysis_result):
+    lines = analysis_result.split('\n')
+    ingredients = []
+    for line in lines:
+        if '(' in line and ')' in line:
+            item = line.split('(')[0].strip()
+            if item and not any(word in item.lower() for word in ['unfortunately', 'however', 'please', 'total']):
+                ingredients.append(item)
+    return ingredients
 
 def generate_recipes_spoonacular(ingredients):
     base_url = "https://api.spoonacular.com/recipes/findByIngredients"
@@ -131,12 +71,12 @@ def generate_recipes_spoonacular(ingredients):
     
     try:
         response = requests.get(base_url, params=params)
-        response.raise_for_status()
+        response.raise_for_status()  # Raises an HTTPError for bad responses
         recipes = response.json()
         
         if not recipes:
-            print("No recipes found.")
-            return []
+            print("No recipes found. Using fallback method.")
+            return generate_fallback_recipes(ingredients)
         
         detailed_recipes = []
         for recipe in recipes:
@@ -145,10 +85,10 @@ def generate_recipes_spoonacular(ingredients):
             if detailed_recipe:
                 detailed_recipes.append(detailed_recipe)
         
-        return detailed_recipes
+        return detailed_recipes if detailed_recipes else generate_fallback_recipes(ingredients)
     except requests.exceptions.RequestException as e:
         print(f"Error calling Spoonacular API: {e}")
-        return []
+        return generate_fallback_recipes(ingredients)
 
 def get_recipe_details(recipe_id):
     base_url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
@@ -172,45 +112,50 @@ def get_recipe_details(recipe_id):
         print(f"Error getting recipe details: {e}")
         return None
 
+def generate_fallback_recipes(ingredients):
+    print("Using fallback recipe generation method.")
+    recipes = []
+    for i in range(3):
+        recipe = {
+            'name': f"Simple {random.choice(ingredients)} Recipe {i+1}",
+            'ingredients': [{'name': ing} for ing in random.sample(ingredients, min(len(ingredients), 5))],
+            'instructions': "Mix all ingredients and cook to your liking.",
+            'calories': random.randint(200, 800)
+        }
+        recipes.append(recipe)
+    return recipes
+
 def main():
     image_path = "images/Fridge1.jpg"
     
     # Analyze the fridge image
-    analysis_result, annotated_image, items_info = analyze_fridge_image(image_path)
+    analysis_result = analyze_fridge_image(image_path)
+    print("Fridge Analysis Result:")
+    print(analysis_result)
     
-    if analysis_result and annotated_image and items_info:
-        print("Fridge Analysis Result:")
-        print(analysis_result)
+    # Extract ingredients from the analysis result
+    ingredients = extract_ingredients(analysis_result)
+    print("\nExtracted Ingredients:")
+    print(ingredients)
+    
+    if ingredients:
+        # Generate recipes using Spoonacular or fallback method
+        recipes = generate_recipes_spoonacular(ingredients)
         
-        # Save the annotated image
-        annotated_image.save("annotated_fridge.jpg")
-        print("Annotated image saved as 'annotated_fridge.jpg'")
-        
-        # Extract ingredients from the items_info
-        ingredients = list(items_info.keys())
-        print("\nExtracted Ingredients:")
-        print(ingredients)
-        
-        if ingredients:
-            # Generate recipes using Spoonacular
-            recipes = generate_recipes_spoonacular(ingredients)
-            
-            if recipes:
-                print("\nGenerated Recipes:")
-                for i, recipe in enumerate(recipes, 1):
-                    print(f"\nRecipe {i}: {recipe['name']}")
-                    print("Ingredients used:")
-                    for ingredient in recipe['ingredients']:
-                        print(f"- {ingredient['name']}")
-                    print("Instructions:")
-                    print(recipe['instructions'])
-                    print(f"Approximate calories: {recipe['calories']}")
-            else:
-                print("No recipes could be generated.")
+        if recipes:
+            print("\nGenerated Recipes:")
+            for i, recipe in enumerate(recipes, 1):
+                print(f"\nRecipe {i}: {recipe['name']}")
+                print("Ingredients used:")
+                for ingredient in recipe['ingredients']:
+                    print(f"- {ingredient['name']}")
+                print("Instructions:")
+                print(recipe['instructions'])
+                print(f"Approximate calories: {recipe['calories']}")
         else:
-            print("No ingredients were extracted. Please check the image analysis result.")
+            print("No recipes could be generated.")
     else:
-        print("Image analysis failed. Please try again later.")
+        print("No ingredients were extracted. Please check the image analysis result.")
 
 if __name__ == "__main__":
     main()

@@ -132,7 +132,7 @@ def generate_recipes_groq(ingredients):
     4. Estimated calories per serving
     5. Cuisine type
 
-    Present the information in a clear, structured format.
+    Present the information in a clear, structured format. Make sure all the recipes use only the ingredients in the fridge and no new ingredients other than seasonings.
     """
 
     response = groq_client.chat.completions.create(
