@@ -10,10 +10,7 @@ from groq import Groq
 import re
 import requests
 import time
-import matplotlib.pyplot as plt
 import io
-
-
 
 # Load environment variables
 load_dotenv()
@@ -28,7 +25,6 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # Spoonacular API configuration
 SPOONACULAR_API_KEY = os.getenv("SPOONACULAR_API_KEY")
 
-# Encode the image in base64
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
@@ -46,16 +42,15 @@ def analyze_fridge_image(image_path):
         Location: [Bounding box coordinates as [ymin, xmin, ymax, xmax] where each coordinate is an integer between 0 and 1000]
         """
 
-        # Retry logic for quota errors
-        for attempt in range(3):  # Retry up to 3 times
+        for attempt in range(3):
             try:
                 response_items = model.generate_content([prompt_items, image])
-                break  # Break the loop if successful
+                break
             except Exception as e:
                 if '429' in str(e):
-                    if attempt < 2:  # If not the last attempt
+                    if attempt < 2:
                         st.warning("Quota exceeded. Retrying in 5 seconds...")
-                        time.sleep(5)  # Wait before retrying
+                        time.sleep(5)
                     else:
                         st.error("Quota exceeded. Please try again later.")
                         return None, None, None
@@ -66,22 +61,17 @@ def analyze_fridge_image(image_path):
         items_info = parse_item_info(response_items.text.strip())
         annotated_image = generate_annotated_image(image_path, items_info)
 
-        # Modify this line to exclude location details
         analysis_result = "\n".join([f"{item}: {info['quantity']}" for item, info in items_info.items()])
         analysis_result += f"\n\nTotal number of distinct food items: {len(items_info)}"
         
         return analysis_result, annotated_image, items_info
 
-    except Exception as e:  # General exception handling for errors in the AI service
+    except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         return None, None, None
     finally:
-        # Ensure the image file is closed properly
         image.close()
 
-        
-        
-# Parse item info from the model's response
 def parse_item_info(response_text):
     items_info = {}
     current_item = None
@@ -98,14 +88,12 @@ def parse_item_info(response_text):
             items_info[current_item]['location'] = location if box == [0, 0, 0, 0] else f"Coordinates: {box}"
     return items_info
 
-# Parse bounding box information
 def parse_bounding_box(text):
     match = re.search(r'\[?\s*(\d+)\s*,?\s*(\d+)\s*,?\s*(\d+)\s*,?\s*(\d+)\s*\]?', text)
     if match:
         return [int(match.group(i)) for i in range(1, 5)]
     return [0, 0, 0, 0]
 
-# Convert bounding box coordinates
 def convert_coordinates(box, original_width, original_height):
     ymin, xmin, ymax, xmax = box
     return [
@@ -115,7 +103,6 @@ def convert_coordinates(box, original_width, original_height):
         int(xmax / 1000 * original_width)
     ]
 
-# Generate annotated image with bounding boxes
 def generate_annotated_image(image_path, items_info):
     image = cv2.imread(image_path)
     height, width = image.shape[:2]
@@ -138,26 +125,121 @@ def generate_annotated_image(image_path, items_info):
 
     return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
-# Generate recipes using Groq model
-def generate_recipes_groq(ingredients):
+def display_ingredient_grid(items_info):
+    st.subheader("🥕 Detected Ingredients")
+    
+    # Custom CSS for the ingredient grid
+    st.markdown("""
+    <style>
+    .ingredient-card {
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 5px;
+        text-align: center;
+        height: 100px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+    }
+    .ingredient-name {
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .ingredient-quantity {
+        font-size: 0.9em;
+        color: #666;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Create a 4-column grid
+    cols = st.columns(4)
+    for i, (item, info) in enumerate(items_info.items()):
+        with cols[i % 4]:
+            st.markdown(f"""
+                <div class="ingredient-card">
+                    <div class="ingredient-name">{item}</div>
+                    <div class="ingredient-quantity">{info['quantity']}</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+def get_recipes_from_spoonacular(ingredients, number=4):
+    url = "https://api.spoonacular.com/recipes/findByIngredients"
+    params = {
+        'apiKey': SPOONACULAR_API_KEY,
+        'ingredients': ','.join(ingredients),
+        'number': number,
+        'ranking': 2,
+        'ignorePantry': True
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        
+        recipes = response.json()
+        
+        if not recipes:
+            st.warning(f"No recipes found for the given ingredients.")
+            st.info("Try uploading a different image with more ingredients.")
+        
+        return recipes
+    except requests.exceptions.RequestException as e:
+        st.error(f"An error occurred while fetching recipes: {str(e)}")
+        st.info("Response content:")
+        st.code(response.text)
+        return []
+
+def generate_recipe_details_groq(recipe):
     prompt = f"""
-    Based on the following ingredients found in a refrigerator, suggest 2 recipes:  # Changed to 2 recipes
-    {', '.join(ingredients)}
+    Generate a detailed recipe for "{recipe['title']}" based on the following information:
+    
+    Ingredients:
+    {' '.join([f"- {ingredient['original']}" for ingredient in recipe.get('usedIngredients', []) + recipe.get('missedIngredients', [])])}
+    
+    Provide the following information in this exact format:
+    
+    Key Information:
+    Calories: [Estimated calories per serving]
+    Cooking Time: [Estimated total time in minutes]
+    Price: [Estimated price per serving in USD]
+    Dietary: [List any dietary categories this recipe fits, e.g., Vegetarian, Vegan, Gluten-Free, etc.]
+    Cuisine: [Type of cuisine, e.g., Italian, Mexican, etc.]
+    Difficulty: [Easy/Medium/Hard]
 
-    For each recipe, provide:
-    1. Recipe name
-    2. List of ingredients with quantities
-    3. Cooking instructions
-    4. Estimated calories per serving
-    5. Cuisine type
+    Description:
+    [Provide a brief, enticing description of the dish in 2-3 sentences]
 
-    Present the information in a clear, structured format.
+    Instructions:
+    1. [Step 1]
+    2. [Step 2]
+    ...
+    
+    Cooking Techniques:
+    [List 2-3 main cooking techniques used in this recipe]
+
+    Flavor Profile:
+    [Describe the main flavors of the dish]
+
+    Texture:
+    [Describe the texture of the finished dish]
+
+    Nutritional Highlights:
+    [Mention 2-3 key nutritional benefits of the dish]
+
+    Serving Suggestions:
+    [Provide 1-2 suggestions for serving or pairing the dish]
+
+    Tips:
+    [Provide 1-2 cooking tips or variations for this recipe]
     """
     
     response = groq_client.chat.completions.create(
         model="mixtral-8x7b-32768",
         messages=[
-            {"role": "system", "content": "You are a helpful culinary assistant."},
+            {"role": "system", "content": "You are a helpful culinary assistant with expertise in various cuisines and cooking techniques."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.7,
@@ -166,179 +248,132 @@ def generate_recipes_groq(ingredients):
 
     return response.choices[0].message.content
 
-# Spoonacular API recipe search function
-def search_recipes_spoonacular(ingredients, cuisine=None, diet=None, intolerances=None, recipe_type=None):
-    url = "https://api.spoonacular.com/recipes/findByIngredients"
-    params = {
-        'apiKey': SPOONACULAR_API_KEY,
-        'ingredients': ','.join(ingredients),
-        'number': 2,  # Limit to 2 recipes
-        'ranking': 1
-    }
-    # Add additional parameters if provided
-    if cuisine and cuisine != "Any":
-        params['cuisine'] = cuisine
-    if diet and diet != "Any":
-        params['diet'] = diet
-    if intolerances:
-        params['intolerances'] = ','.join(intolerances)
-    if recipe_type and recipe_type != "Any":
-        params['type'] = recipe_type
+def parse_recipe_key_info(recipe_details):
+    key_info = {}
+    key_info_section = recipe_details.split("Key Information:")[1].split("\n\n")[0]
+    for line in key_info_section.split("\n"):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            key_info[key.strip()] = value.strip()
+    return key_info
 
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        st.error(f"Error: {response.status_code} - {response.text}")
-        return []
+def create_recipe_card(recipe, recipe_details):
+    missed_ingredients = ', '.join([ing['name'] for ing in recipe.get('missedIngredients', [])])
+    used_ingredients = ', '.join([ing['name'] for ing in recipe.get('usedIngredients', [])])
+    key_info = parse_recipe_key_info(recipe_details)
 
-def generate_nutritional_info(ingredients):
-    prompt = f"""
-    Provide the nutritional information for the following ingredients:
-    {', '.join(ingredients)}
-
-    Include total calories, protein, total fat, carbohydrates, and health score.
-    Present the information in a clear format.
+    if 'Calories' not in key_info:
+        key_info['Calories'] = "Not Found"
+    if 'Cooking Time' not in key_info:
+        key_info['Cooking Time'] = "Not Found"
+    if 'Price' not in key_info:
+        key_info['Price'] = "Not Found"
+    if 'Dietary' not in key_info:
+        key_info['Dietary'] = "Not Found"
+    if 'Cuisine' not in key_info:
+        key_info['Cuisine'] = "Not Found"
+    if 'Difficulty' not in key_info:
+        key_info['Difficulty'] = "Not Found"
+    
+    return f"""
+    <div style="border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); height: 600px; overflow-y: auto;">
+        <img src="{recipe['image']}" style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px;">
+        <h3 style="margin-top: 10px;">{recipe['title']}</h3>
+        <p>🔥 **Calories**: {key_info['Calories']}</p>
+        <p>⏱️ **Cooking Time**: {key_info['Cooking Time']}</p>
+        <p>💰 **Price**: {key_info['Price']}</p>
+        <p>🥗 **Dietary**: {key_info['Dietary']}</p>
+        <p>🌎 **Cuisine**: {key_info['Cuisine']}</p>
+        <p>📊 **Difficulty**: {key_info['Difficulty']}</p>
+        <p><strong>Used ingredients:</strong> {used_ingredients}</p>
+        <p><strong>Missing ingredients:</strong> {missed_ingredients}</p>
+        <div>
+            {recipe_details}
+        </div>
+    </div>
     """
 
-    response = groq_client.chat.completions.create(
-        model="mixtral-8x7b-32768",
-        messages=[
-            {"role": "system", "content": "You are a helpful nutritional assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.7,
-        max_tokens=300
-    )
-
-    return response.choices[0].message.content
-       
-# Get recipe details from Spoonacular API
-def get_recipe_details(recipe_id, ingredients):
-    url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
-    params = {
-        'apiKey': SPOONACULAR_API_KEY
-    }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        # If Spoonacular fails, generate details using Groq
-        st.warning("Generating recipe details using Groq...")
-        return generate_recipes_groq(ingredients)
-    
-def plot_nutrition_pie_chart(calories, protein, total_fat, carbs):
-    labels = ['Calories', 'Protein', 'Total Fat', 'Carbs']
-    sizes = [calories, protein, total_fat, carbs]
-    colors = ['#ff9999','#66b3ff','#99ff99','#ffcc99']
-    
-    fig, ax = plt.subplots()
-    ax.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=140)
-    ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
-
-    # Save it to a BytesIO object to use in Streamlit
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-    
 def main():
-    st.title("Fridge Food Item Detector and Recipe Generator")
+    st.set_page_config(layout="wide", page_title="FoodEase")
+    st.title("🍽️ FoodEase: AI Family Hub")
 
-    st.sidebar.subheader("Search for Recipes")
-    
-    # Sidebar for recipe search options
-    cuisine = st.sidebar.selectbox("Cuisine", ["Any", "Italian", "Chinese", "Indian", "Mexican", "American", "French", "Thai"])
-    diet = st.sidebar.selectbox("Diet", ["Any", "Vegetarian", "Vegan", "Keto", "Paleo"])
-    intolerances = st.sidebar.multiselect("Intolerances", ["Dairy", "Gluten", "Peanut", "Seafood", "Soy", "Tree Nut", "Wheat"])
-    recipe_type = st.sidebar.selectbox("Type of Meal", ["Any", "Breakfast", "Lunch", "Dinner", "Snack", "Dessert"])
+    # Initialize session state
+    if 'analysis_complete' not in st.session_state:
+        st.session_state.analysis_complete = False
+    if 'items_info' not in st.session_state:
+        st.session_state.items_info = {}
+    if 'original_image' not in st.session_state:
+        st.session_state.original_image = None
+    if 'annotated_image' not in st.session_state:
+        st.session_state.annotated_image = None
 
-    # File uploader for fridge image
-    uploaded_image = st.file_uploader("Upload an image of your fridge", type=["jpg", "jpeg", "png"])
+    uploaded_image = st.file_uploader("📸 Upload an image of your fridge", type=["jpg", "jpeg", "png"])
 
-    if uploaded_image:
-        st.image(uploaded_image, caption='Uploaded Image', use_column_width=True)
+    if uploaded_image and not st.session_state.analysis_complete:
+        st.session_state.original_image = Image.open(uploaded_image)
+        
         temp_file_path = f"temp_{uploaded_image.name}"
         with open(temp_file_path, "wb") as f:
             f.write(uploaded_image.getvalue())
 
-        # Analyze the fridge image
-        analysis_result, annotated_image, items_info = analyze_fridge_image(temp_file_path)
+        with st.spinner("🔍 Analyzing fridge contents..."):
+            analysis_result, annotated_image, items_info = analyze_fridge_image(temp_file_path)
 
         if analysis_result and annotated_image and items_info:
-            st.success("Fridge analysis completed!")
-            st.text(analysis_result)
+            st.session_state.annotated_image = annotated_image
+            st.session_state.analysis_result = analysis_result
+            st.session_state.items_info = items_info
+            st.session_state.analysis_complete = True
 
-            # Display the annotated image
-            st.image(annotated_image, caption="Annotated Image", use_column_width=True)
-
-            # Extract ingredients for recipe generation
-            ingredients = list(items_info.keys())
-            if ingredients:
-                # Search recipes based on sidebar selections
-                recipes = search_recipes_spoonacular(ingredients, cuisine if cuisine != "Any" else None, 
-                                                      diet if diet != "Any" else None, 
-                                                      intolerances, 
-                                                      recipe_type if recipe_type != "Any" else None)
-
-                if recipes:
-                    # Create two columns for displaying recipes side by side
-                    col1, col2 = st.columns(2)
-
-                    # Loop through the recipes
-                    for i, recipe in enumerate(recipes):
-                        with col1 if i % 2 == 0 else col2:  # Use col1 for even indices, col2 for odd indices
-                            st.subheader(recipe['title'])
-                            st.image(recipe['image'], width=200)
-                            st.markdown(f"[Link to recipe](https://spoonacular.com/recipes/{recipe['title'].replace(' ', '-').lower()}-{recipe['id']})")
-
-                            # Get detailed recipe info
-                            recipe_details = get_recipe_details(recipe['id'], ingredients)
-
-                            # Display recipe instructions and nutritional info
-                            if isinstance(recipe_details, dict):  # Check if recipe details are a dictionary
-                                st.markdown("**Instructions:**")
-                                instructions = recipe_details.get("instructions", "Instructions not available.")
-                                instructions_clean = re.sub(r'<.*?>', '', instructions)  # Remove HTML tags
-                                st.write(instructions_clean)
-
-                                # Display nutritional information in a table-like format
-                                if 'nutrition' in recipe_details:
-                                    nutritional_info = recipe_details['nutrition']
-                                    calories = nutritional_info.get("nutrients", [{}])[0].get("amount", 0)
-                                    protein = nutritional_info.get("nutrients", [{}])[1].get("amount", 0)
-                                    total_fat = nutritional_info.get("nutrients", [{}])[2].get("amount", 0)
-                                    carbs = nutritional_info.get("nutrients", [{}])[3].get("amount", 0)
-                                    health_score = recipe_details.get("healthScore", "N/A")
-
-                                    # Display nutritional information in a table-like format
-                                    st.markdown(f"**Quickview**  \n"
-                                                f"|{calories} Calories|  |{protein}g Protein|  |{total_fat}g Total Fat|  |{carbs}g Carbs|  |{health_score}% Health Score|")
-
-                                    # Generate and display the pie chart
-                                    pie_chart_buf = plot_nutrition_pie_chart(calories, protein, total_fat, carbs)
-                                    st.image(pie_chart_buf, caption='Nutritional Breakdown', use_column_width=True)
-                                else:
-                                    # If no nutrition data from Spoonacular, generate it using Groq
-                                    st.warning("Generating nutritional information using Groq...")
-                                    nutritional_info = generate_nutritional_info([recipe['title']])  # Use recipe name only
-                                    st.markdown("**Quickview**  \n" + nutritional_info)
-
-
-
-
-                else:
-                    st.warning("No recipes found for the provided ingredients.")
-            else:
-                st.error("No ingredients were detected.")
-
-        # Ensure file is closed before deletion
         try:
             os.remove(temp_file_path)
         except PermissionError as e:
             st.warning(f"Could not delete temporary file: {e}")
+
+    # Always display images if they exist in session state
+    if st.session_state.original_image and st.session_state.annotated_image:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(st.session_state.original_image, caption='Uploaded Image', use_column_width=True)
+        with col2:
+            st.image(st.session_state.annotated_image, caption="Annotated Image", use_column_width=True)
+
+    if st.session_state.analysis_complete:
+        st.success("✅ Fridge analysis completed!")
+        # st.text(st.session_state.analysis_result)
+
+        # Display ingredient grid
+        display_ingredient_grid(st.session_state.items_info)
+
+        # Add a top margin to the button
+        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+        
+        if st.button("🍳 Generate Recipes", key="generate_recipes"):
+            st.subheader("🍽️ Generated Recipes")
+            with st.spinner("🔍 Searching for delicious recipes..."):
+                recipes = get_recipes_from_spoonacular(list(st.session_state.items_info.keys()))
+            
+            if recipes:
+                for i in range(0, len(recipes), 2):
+                    cols = st.columns(2)
+                    for j in range(2):
+                        if i + j < len(recipes):
+                            recipe = recipes[i + j]
+                            with cols[j]:
+                                with st.spinner(f"✨ Generating details for {recipe['title']}..."):
+                                    recipe_details = generate_recipe_details_groq(recipe)
+                                recipe_card = create_recipe_card(recipe, recipe_details)
+                                st.markdown(recipe_card, unsafe_allow_html=True)
+            else:
+                st.warning("😕 No recipes found. Try uploading a different image with more ingredients.")
+    
+    # Add a top margin to the button
+    st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+
+    # if st.button("🔄 Reset"):
+    #     for key in list(st.session_state.keys()):
+    #         del st.session_state[key]
+    #     st.rerun()
 
 if __name__ == "__main__":
     main()
