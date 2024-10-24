@@ -376,18 +376,9 @@ def main():
                             
                             recipe_card = create_recipe_card(recipe, st.session_state.recipe_details[recipe_id])
                             st.markdown(recipe_card, unsafe_allow_html=True)
-                            
-                            # Add meal type selection and save button
-                            meal_type = st.selectbox(
-                                "Select meal type",
-                                options=['Breakfast', 'Lunch', 'Dinner', 'Snack'],
-                                key=f"meal_type_{recipe['id']}"
-                            )
-                            
-                            if st.button("💾 Save Recipe", key=f"save_recipe_{recipe['id']}"):
-                                save_recipe(recipe, st.session_state.recipe_details[recipe_id], meal_type)
-        else:
-            st.warning("😕 No recipes found. Try uploading a different image with more ingredients.")
+
+        # else:
+        #     st.warning("😕 No recipes found. Try uploading a different image with more ingredients.")
 
     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
 
