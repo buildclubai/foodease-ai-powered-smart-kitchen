@@ -1,3 +1,7 @@
+> [!NOTE]  
+> This project is part of our Build Club e-learning.
+> To get a guided tutorial please visit and [enroll in our courses](https://app.buildclub.ai/learn/).
+
 # FoodEase: AI-Powered Smart Kitchen Assistant 🍽️
 
 FoodEase is an intelligent kitchen management system that helps you make the most of your ingredients and maintain healthy eating habits. Using advanced AI, it analyzes your refrigerator contents, suggests recipes, and tracks your nutritional intake over time.
